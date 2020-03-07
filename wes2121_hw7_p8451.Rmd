@@ -97,6 +97,8 @@ Since the outcome prevalence is near 0.5, we don't have to worry as much about u
 Now, I'll run a classification tree using all of the features available in the dataset.
 
 ```{r}
+set.seed(1)
+
 train_control =
   trainControl(method = "cv", number = 10)
 
@@ -107,10 +109,17 @@ tune_grid =
 
 single_tree =
   train(outcome ~ .,
-      data = train,
-      method = "rpart",
-      trControl = train_control,
-      tuneGrid = tune_grid)
+        data = train,
+        method = "rpart",
+        trControl = train_control,
+        tuneGrid = tune_grid)
+
+# single_tree =
+#   train(x = train[, -14],
+#         y = train[, 14],
+#         method = "rpart",
+#         trControl = train_control,
+#         tuneGrid = tune_grid)
 
 ```
 
@@ -136,6 +145,8 @@ varImp(single_tree$finalModel) %>%
   knitr::kable()
 
 ```
+
+NOTE: I've used dummy variable coding to identify which levels of categorical variables are most important for prediction. This is opposed to keeping factor variables unified. You can see the most important variables listed above.
 
 ### Cross-validated accuracy - classification tree
 
@@ -178,16 +189,32 @@ I'll use `purrr::map2()` to map over 2 sets of parameters iteratively within a r
 ```{r}
 set.seed(1)
 
+## using model.matrix to dummify factor vars - randomForest doesn't do this automatically
+
+x_forest <- model.matrix(outcome~.,data)[train_idx,-1] ## -1 removes intercept created using model.matrix
+y_forest <- data$outcome[train_idx]
+
 forest = function(m, n) {
   
   set.seed(1)
   
-  a =  
-    randomForest(outcome ~., 
-                 data = train, 
-                 mtry = m, 
+  ## formula implementation
+  # a =
+  #   randomForest(outcome ~.,
+  #                data = train,
+  #                mtry = m,
+  #                ntree = n,
+  #                importance = TRUE)
+  
+  ## model.matrix implementation
+  a =
+    randomForest(x = x_forest,
+                 y = y_forest,
+                 #data = train,
+                 mtry = m,
                  ntree = n,
                  importance = TRUE)
+  
   
   tibble(
     mtry = m,
@@ -223,7 +250,7 @@ rf_accuracies =
   arrange(desc(acc))
 ```
 
-It looks like our top 6 combinations all have an accuracy of `r rf_accuracies[1,3]`. We'll use the most parsimonious, where `mtry` = 1, `ntree` = 400.
+It looks like our top 6 combinations all have an approximate accuracy of `r rf_accuracies[1,3]`. We'll use the top result, where `mtry` = `rf_accuracies[1,1]`, `ntree` = `rf_accuracies[1,2]`.
 
 ```{r}
 rf_accuracies %>% 
@@ -241,29 +268,103 @@ Using these tuning parameters, I'll calculate appropriate evaluation metrics and
 set.seed(1)
 
 final_forest =
-  randomForest(outcome ~., 
-               data = train, 
-               mtry = 1, 
-               ntree = 400,
+  randomForest(x = x_forest, 
+               y = y_forest, 
+               mtry = as.numeric(rf_accuracies[1,1]), 
+               ntree = as.numeric(rf_accuracies[1,2]),
                importance = TRUE)
 
-varImpPlot(final_forest)
+varImpPlot(final_forest, class = TRUE)
+
+rows = importance(final_forest) %>% rownames()
+
+importance(final_forest) %>% 
+  as_tibble() %>% 
+  mutate("Variable" = rows) %>% 
+  select(Variable, MeanDecreaseAccuracy) %>% 
+  arrange(desc(MeanDecreaseAccuracy)) %>% 
+  knitr::kable()
 
 ```
 
-Since we're not interested in separating subpopulations, it makes most sense for us to look at the mean decrease in accuracy for each variable upon removing it from the model (`MeanDecreaseAccuracy`) as a measure of variable importance. It looks like `vessels_colorflu`, `defect`, and `exerc_angina` are the top three most important using this measure in our final random forest model.
+Since we're not interested in separating subpopulations, it makes most sense for us to look at the mean decrease in accuracy for each variable upon removing it from the model (`MeanDecreaseAccuracy`) as a measure of variable importance. It looks like `exerc_angina1` (having category 1 for the variable), `pain_type4` (having category 4 for the variable), and `defect3` (having category 3 for the variable) are the top three most important using this measure in our final random forest model.
+
+NOTE: As above, I've used dummy variable coding to identify which levels of categorical variables are most important for prediction. This is opposed to keeping factor variables unified.
+
+### OOB accuracy - random forest
+
+I'll assess the out-of-bag (OOB) accuracy for the random forest. This is similar to the cross-validated accuracy, which should ideally be used to compare accuracy across models - but this will serve as an acceptable approximation.
+
+```{r}
+
+1 - final_forest$err.rate[as.numeric(rf_accuracies[1,2])]
+
+```
+
+The OOB accuracy for our final random forest model is `r 1 - final_forest$err.rate[as.numeric(rf_accuracies[1,2])]`. This is compared to the single tree's accuracy measure of `r get_best_result(single_tree)[[2]]`, which is slightly worse than our random forest model.
 
 # 4. Answer the questions:
 
 ### a. Are there differences in variable importance that you see between a single tree and an ensemble metric?
 
-Yes, there are differences in important variables between the single tree and the ensemble metric.
+Yes, there are slight differences in important variables between the single tree and the ensemble metric, but overall the variable categories are similar. (See NOTE above - I am ranking the importance of categorical levels of such variables.)
+
+Let's compare:
+
+```{r}
+
+## rpart kable
+varImp(single_tree$finalModel) %>% 
+  rownames_to_column(var = "Variable") %>% 
+  arrange(desc(Overall)) %>% 
+  rename(Importance = Overall) %>% 
+  knitr::kable(caption = "Single Tree") %>% 
+  kableExtra::kable_styling(full_width = F,
+                            position = "float_left")
+
+## rf kable
+importance(final_forest) %>% 
+  as_tibble() %>% 
+  mutate("Variable" = rows) %>% 
+  select(Variable, MeanDecreaseAccuracy) %>% 
+  arrange(desc(MeanDecreaseAccuracy)) %>% 
+  knitr::kable(caption = "Random Forest") %>% 
+  kableExtra::kable_styling(full_width = F,
+                          position = "float_right")
+
+```
 
 ### b. Are there differences observed across the different variable importance metrics output from the ensemble?
 
+Since they're not displayed above, let's look at the two measures from the random tree:
+
+```{r}
+
+importance(final_forest) %>% 
+  as_tibble() %>% 
+  mutate("Variable" = rows) %>% 
+  select(Variable, MeanDecreaseAccuracy, MeanDecreaseGini) %>% 
+  arrange(desc(MeanDecreaseAccuracy)) %>% 
+  knitr::kable(caption = "Random Forest") %>% 
+  kableExtra::kable_styling(full_width = F)
+
+```
+
+Yes, there are differences in which variables are ranked as important when comparing the two measures, mean decrease in accuracy and mean decrease in Gini coefficient. I explain further below (Section c.ii.).
+
 ### c. How do you interpret those differences?
 
+#### i. Differences between single-tree and random forest importances 
+
+These models' respective variable importance measures are not measuring the same thing: the single tree's variable importance is a measure of goodness of fit in both primary variable splits and surrogates, and the random forest's is a measure of the mean decrease in accuracy across trees when a variable is removed. Thus, some amount of difference is due to this baseline difference. As an implication, single-tree importance is a variable's importance across splits of one tree, but random forest importance is measured globally across many trees: perhaps a more robust indicator of a variable's actual importance given the resampling nature of random forests.
+
+#### ii. Differences across variable importance metrics from the ensemble
+
+As we can see, there are fairly significant differences between which variables are determined important using mean decrease in accuracy and using mean decrease in Gini. As discussed before, mean decrease in accuracy gives a more interpretable measure of global importance across all trees in the forest, whereas Gini gives an indicator of how important a given variable may be in determining subpopulations via its splits - thus, differences in these measures may be due to this difference in interpretation. Which we use ultimately depends on how we want to define 'importance'.
+
 # 5. Use a boosting algorithm and tune to obtain your optimal model. Compare to the results from the single classification tree and the random forest.
+
+
 
 # 6. Which model performs the best? Provide justification for your answer.
 
