@@ -148,7 +148,7 @@ varImp(single_tree$finalModel) %>%
 
 NOTE: I've used dummy variable coding to identify which levels of categorical variables are most important for prediction. This is opposed to keeping factor variables unified. You can see the most important variables listed above.
 
-### Cross-validated accuracy - classification tree
+### Cross-validated accuracy - tree-based model
 
 ```{r}
 get_best_result = function(caret_fit) {
@@ -250,11 +250,12 @@ rf_accuracies =
   arrange(desc(acc))
 ```
 
-It looks like our top 6 combinations all have an approximate accuracy of `r rf_accuracies[1,3]`. We'll use the top result, where `mtry` = `rf_accuracies[1,1]`, `ntree` = `rf_accuracies[1,2]`.
+It looks like our top 6 combinations all have an approximate accuracy of `r rf_accuracies[1,3]`. We'll use the top result, where `mtry` = `r rf_accuracies[[1,1]]`, `ntree` = `r rf_accuracies[[1,2]]`.
 
 ```{r}
-rf_accuracies %>% 
-  head(10) %>% 
+
+rf_accuracies %>%
+  head(10) %>%
   knitr::kable()
 
 ```
@@ -283,7 +284,8 @@ importance(final_forest) %>%
   mutate("Variable" = rows) %>% 
   select(Variable, MeanDecreaseAccuracy) %>% 
   arrange(desc(MeanDecreaseAccuracy)) %>% 
-  knitr::kable()
+  knitr::kable(caption = "Random Forest Model") %>% 
+  kableExtra::kable_styling(full_width = F)
 
 ```
 
@@ -364,8 +366,121 @@ As we can see, there are fairly significant differences between which variables 
 
 # 5. Use a boosting algorithm and tune to obtain your optimal model. Compare to the results from the single classification tree and the random forest.
 
+```{r}
 
+set.seed(1)
+
+gbm_grid =
+  expand.grid(
+    n.trees = seq(500, 5000, length = 10),
+    shrinkage = 10^seq(-5, -1, length = 10),
+    interaction.depth = 1,   ## default value but have to specify in tuneGrid
+    n.minobsinnode = 10      ## default ...
+  )
+
+boost_model =
+  train %>% 
+  # mutate(
+  #   outcome = as.numeric(outcome)   ## gbm package requires numeric outcome
+  # ) %>% 
+  # gbm(outcome ~.,
+  #     data = .,
+  #     distribution = 'bernoulli',
+  #     n.trees = 2000,
+  #     shrinkage = 0.1)
+  train(outcome~., 
+        data = .,
+        distribution = 'bernoulli',
+        method = 'gbm',
+        trControl = train_control,
+        tuneGrid = gbm_grid,
+        verbose = FALSE           ## omg outputs a million lines of results if you don't do this
+        )
+
+
+boost_model$bestTune
+
+#cheer::cheer()
+
+```
+
+After tuning two parameters - `n.trees` and `shrinkage` - we found the best values were `r boost_model$bestTune[[1]]` and `r boost_model$bestTune[[2]]`, respectively. (I left the other two parameters required for the `gbm` model at their defaults.)
+
+I'll plot the loss function of the model using these parameters to make sure our model is optimized.
+
+```{r}
+library(gbm)
+set.seed(1)
+
+final_gbm =
+  train %>% 
+  mutate(
+    outcome = as.numeric(outcome) - 1   ## gbm package requires numeric outcome
+  ) %>%
+  gbm(outcome ~.,
+    data = .,
+    distribution = 'bernoulli',
+    n.trees = 1500,
+    shrinkage = 4.641589e-03)
+  
+
+gbm.perf(final_gbm, plot.it=TRUE, oobag.curve=TRUE, overlay=TRUE, method='OOB')
+
+```
+
+
+### Important variables - gradient boosting model
+
+The variables of importance are fairly similar to our previous results - for example, the top six variables here mirror ours from the random forest model, but in a slightly different order - but, as expected, neither the importance order nor values are exactly the same.
+
+```{r}
+
+summary(boost_model$finalModel) %>% 
+  as_tibble() %>% 
+  knitr::kable(caption = "Gradient Boosted Model") %>% 
+  kableExtra::kable_styling(full_width = F)
+
+```
+
+### Accuracy - gradient boosting model
+
+```{r}
+set.seed(1)
+pred_gbm = predict(final_gbm, train, n.trees = 1500, type = "response")
+## need many more trees with boosting - growing stumps, so not informative
+
+pred_gbm_class = round(pred_gbm)
+
+misClasificError <- mean(pred_gbm_class != as.numeric(train$outcome) - 1)
+print(paste('Accuracy Model',1 - misClasificError))
+
+```
+
+We can see that the accuracy of our GBM model is `r 1-misClasificError`, better than our previous models.
 
 # 6. Which model performs the best? Provide justification for your answer.
+
+The GBM model performs the best. We can see the error rates of the three models - single tree, random forest, and gradient boosted - below.
+
+```{r}
+
+## create kable of accuracies
+
+tibble(
+  "Model" = 
+    c("Single Tree",
+    "Random Forest",
+    "GBM"),
+  "Accuracy" =
+  c(get_best_result(single_tree)[[2]], 
+    1 - final_forest$err.rate[as.numeric(rf_accuracies[1,2])],
+    1 - misClasificError)
+  ) %>% 
+  knitr::kable(caption = "Accuracies") %>% 
+  kableExtra::kable_styling(full_width = F)
+
+
+```
+
 
 # 7. How do these results compare to the SVC analysis we did back in Class 6?
