@@ -1,0 +1,270 @@
+---
+title: "P8451 Homework 7"
+author: "Will Simmons"
+date: "03/10/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(NHANES)
+library(caret)
+library(pROC)
+library(e1071)
+library(randomForest)
+```
+
+# 1. Clean the data, as demonstrated in class. This includes removing ? as a missingness indicator, collapsing the heart disease present variable into “Present” and “Not Present”.
+
+```{r}
+miss_data <- read.csv("./data/processed.cleveland.data", header = FALSE)
+
+var.names <- c("age", "sex", "pain_type", "resting_sysbp", "chol", "fast_blsugar_gt120", "rest_ecg", "max_hr", "exerc_angina", "ST_depression", "ST_slope", "vessels_colorflu", "defect", "heart_disease_present")
+
+colnames(miss_data) <- var.names
+str(miss_data)
+
+miss_data[miss_data == "?"] <- NA
+
+miss_data$defect <- as.numeric(factor(miss_data$defect))
+miss_data$vessels_colorflu <- as.numeric(factor(miss_data$vessels_colorflu))
+
+miss_data$outcome <- ifelse(miss_data$heart_disease_present == 0, 0,1)
+miss_data$heart_disease_present <- NULL
+miss_data$outcome <- factor(miss_data$outcome)
+levels(miss_data$outcome) <- c("HD Not Present", "HD Present")
+str(miss_data)
+summary(miss_data)
+
+#Remove the missings
+data <- na.omit(miss_data)
+
+#Set No Heart Disease as Reference Level
+data$outcome <- relevel(data$outcome, ref = "HD Not Present")
+#Clean up
+rm(var.names)
+
+## Changing var formats
+data =
+  data %>% 
+  mutate(
+    sex = as.factor(sex),
+    pain_type = as.factor(pain_type),
+    fast_blsugar_gt120 = as.factor(fast_blsugar_gt120), 
+    rest_ecg = as.factor(rest_ecg),
+    exerc_angina = as.factor(exerc_angina),
+    ST_slope = as.factor(ST_slope),
+    vessels_colorflu = as.factor(vessels_colorflu),
+    defect = as.factor(defect)
+  )
+```
+
+# 2. Run a single classification tree using all of the features available in the dataset. Calculate evaluation metrics and output the variable importance metrics.
+
+First, I'll split the data into training and test sets.
+
+```{r}
+
+set.seed(1)
+
+train_idx =
+  createDataPartition(data$outcome,
+                      p = 0.7,
+                      list = FALSE)
+
+train = 
+  data[train_idx, ]
+
+test = 
+  data[-train_idx, ]
+
+```
+
+I need to check whether the data are approximately balanced with respect to the outcome. Otherwise, our predictive performance will suffer.
+
+```{r}
+
+train %>% 
+  mutate(outcome2 = as.numeric(outcome) - 1) %>% 
+  summarize(outcome_prevalence = mean(outcome2)) %>% knitr::kable()
+
+```
+
+Since the outcome prevalence is near 0.5, we don't have to worry as much about unbalanced data.
+
+Now, I'll run a classification tree using all of the features available in the dataset.
+
+```{r}
+train_control =
+  trainControl(method = "cv", number = 10)
+
+tune_grid =
+  expand.grid(
+    cp = 10^seq(-5, -1.5, length = 100)
+  )
+
+single_tree =
+  train(outcome ~ .,
+      data = train,
+      method = "rpart",
+      trControl = train_control,
+      tuneGrid = tune_grid)
+
+```
+
+As we can see from the plot below and from calling `bestTune` on the calculated model, our best `cp` value is **`r single_tree$bestTune`**.
+
+```{r}
+
+plot(single_tree)
+
+single_tree$bestTune
+
+```
+
+Finally, we'll look at the characteristics of our final classification tree, including **accuracy** and **important variables**. We'll also look at a confusion matrix of how the model has classified the training data, and the final tree visualization. 
+
+### Important variables - tree-based model
+```{r final_tree_imp}
+
+varImp(single_tree$finalModel) %>% 
+  rownames_to_column(var = "Variable") %>% 
+  arrange(desc(Overall)) %>% 
+  rename(Importance = Overall) %>% 
+  knitr::kable()
+
+```
+
+### Cross-validated accuracy - classification tree
+
+```{r}
+get_best_result = function(caret_fit) {
+  best = which(rownames(caret_fit$results) == rownames(caret_fit$bestTune))
+  best_result = caret_fit$results[best, ]
+  rownames(best_result) = NULL
+  best_result
+}
+
+get_best_result(single_tree) %>% 
+  knitr::kable()
+
+```
+
+As we can see, our final tree model's accuracy is **`r get_best_result(single_tree)[[2]]`**.
+
+### Confusion matrix - classification tree
+
+```{r tree_confusion}
+
+tree_pred = predict(single_tree, newdata = train[, -14])
+table(tree_pred, train$outcome)
+
+```
+
+### Final tree visualization - classification tree
+
+```{r}
+
+rpart.plot::rpart.plot(single_tree$finalModel)
+
+```
+
+# 3. Use random forest to classify heart disease. Set up a pipeline to try different values of mtry and different numbers of trees to obtain your optimal model. Again, calculate appropriate evaluation metrics and output the variable importance metrics.
+
+I'll use `purrr::map2()` to map over 2 sets of parameters iteratively within a random forest model. I'll then create a dataframe of the resulting pairs and their accuracies.
+
+```{r}
+set.seed(1)
+
+forest = function(m, n) {
+  
+  set.seed(1)
+  
+  a =  
+    randomForest(outcome ~., 
+                 data = train, 
+                 mtry = m, 
+                 ntree = n,
+                 importance = TRUE)
+  
+  tibble(
+    mtry = m,
+    ntree = n,
+    acc = 1 - a$err.rate[,1][n]  ## accuracy (1-err) for the nth model - shows accuracy for the full number of trees input
+
+  )
+  
+}
+
+## test
+# f = forest(m = 1, n = 600)
+# plot(1 - f$err.rate[,1])
+# 
+#   tibble(
+#     mtry = 1,
+#     ntree = 600,
+#     acc = 1 - f$err.rate[,1][600]  ## accuracy (1-err) for the nth model - shows accuracy for the full number of trees input
+# 
+#   )
+
+mtry_range = 1:13
+ntree_range = seq(100, 2000, length = 20)
+
+grid = 
+  list(m = mtry_range, 
+       n = ntree_range) %>% 
+  cross_df()
+
+rf_accuracies =
+  map2(.x = grid$m, .y = grid$n, forest) %>% 
+  bind_rows() %>% 
+  arrange(desc(acc))
+```
+
+It looks like our top 6 combinations all have an accuracy of `r rf_accuracies[1,3]`. We'll use the most parsimonious, where `mtry` = 1, `ntree` = 400.
+
+```{r}
+rf_accuracies %>% 
+  head(10) %>% 
+  knitr::kable()
+
+```
+
+Using these tuning parameters, I'll calculate appropriate evaluation metrics and output the variable importance metrics.
+
+### Important variables - random forest
+
+```{r}
+
+set.seed(1)
+
+final_forest =
+  randomForest(outcome ~., 
+               data = train, 
+               mtry = 1, 
+               ntree = 400,
+               importance = TRUE)
+
+varImpPlot(final_forest)
+
+```
+
+Since we're not interested in separating subpopulations, it makes most sense for us to look at the mean decrease in accuracy for each variable upon removing it from the model (`MeanDecreaseAccuracy`) as a measure of variable importance. It looks like `vessels_colorflu`, `defect`, and `exerc_angina` are the top three most important using this measure in our final random forest model.
+
+# 4. Answer the questions:
+
+### a. Are there differences in variable importance that you see between a single tree and an ensemble metric?
+
+Yes, there are differences in important variables between the single tree and the ensemble metric.
+
+### b. Are there differences observed across the different variable importance metrics output from the ensemble?
+
+### c. How do you interpret those differences?
+
+# 5. Use a boosting algorithm and tune to obtain your optimal model. Compare to the results from the single classification tree and the random forest.
+
+# 6. Which model performs the best? Provide justification for your answer.
+
+# 7. How do these results compare to the SVC analysis we did back in Class 6?
