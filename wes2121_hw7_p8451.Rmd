@@ -2,9 +2,10 @@
 title: "P8451 Homework 7"
 author: "Will Simmons"
 date: "03/10/2020"
-output: html_document
+output: word_document
 editor_options: 
   chunk_output_type: console
+always_allow_html: true
 ---
 
 ```{r setup, message = FALSE, warning = FALSE}
@@ -482,5 +483,68 @@ tibble(
 
 ```
 
+To do a final test of this, we can compare our test error rates for each of our models:
+
+```{r}
+## random forest
+
+x_forest_test <- model.matrix(outcome~.,data)[-train_idx,-1] ## -1 removes intercept created using model.matrix
+y_forest_test <- data$outcome[-train_idx]
+
+
+randomForest(x = x_forest_test,
+             y = y_forest_test,
+             mtry = 4,
+             ntree = 300,
+             importance = TRUE)
+  
+  
+  # tibble(
+  #   mtry = m,
+  #   ntree = n,
+  #   acc = 1 - a$err.rate[,1][n]  ## accuracy (1-err) for the nth model - shows accuracy for the full number of trees input
+  # 
+  # )
+
+## test
+# f = forest(m = 1, n = 600)
+# plot(1 - f$err.rate[,1])
+# 
+#   tibble(
+#     mtry = 1,
+#     ntree = 600,
+#     acc = 1 - f$err.rate[,1][600]  ## accuracy (1-err) for the nth model - shows accuracy for the full number of trees input
+# 
+#   )
+
+mtry_range = 1:13
+ntree_range = seq(100, 2000, length = 20)
+
+grid = 
+  list(m = mtry_range, 
+       n = ntree_range) %>% 
+  cross_df()
+
+rf_accuracies =
+  map2(.x = grid$m, .y = grid$n, forest) %>% 
+  bind_rows() %>% 
+  arrange(desc(acc))
+
+
+## GBM
+
+set.seed(1)
+pred_gbm = predict(final_gbm, test, n.trees = 1500, type = "response")
+## need many more trees with boosting - growing stumps, so not informative
+
+pred_gbm_class = round(pred_gbm)
+
+misClasificError <- mean(pred_gbm_class != as.numeric(test$outcome) - 1)
+print(paste('Accuracy Model',1 - misClasificError))
+
+```
+
 
 # 7. How do these results compare to the SVC analysis we did back in Class 6?
+
+While the SVC model outperforms both the single tree and random forest models in terms of predictive accuracy, it does not outperform (or, depending on `set.seed`, likely performs comparably to) our boosted model.
